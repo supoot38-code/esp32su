@@ -14,38 +14,36 @@ machine.freq(240000000)
 time.sleep(1.5)
 
 print("\n" + "="*50)
-print("🤖 AI JAVIT - ระบบอัจฉริยะเต็มรูปแบบ")
+print("🤖 AI JAVIT - ระบบอัจฉริยะ")
 print("="*50)
 
 # พอร์ตสื่อสาร
 i2c = machine.I2C(0, scl=machine.Pin(1), sda=machine.Pin(2), freq=400000)
-spi = machine.SPI(1, baudrate=20000000, sck=machine.Pin(12), mosi=machine.Pin(11), miso=machine.Pin(10))
 
-# อุปกรณ์ควบคุม
-np = NeoPixel(machine.Pin(48), 1, bpp=3)          # ไฟสถานะ
-BTN_ASK = machine.Pin(17, machine.Pin.IN, machine.Pin.PULL_UP)  # ปุ่มกดถามคำถาม
+# อุปกรณ์
+np = NeoPixel(machine.Pin(48), 1, bpp=3)
+BTN_ASK = machine.Pin(17, machine.Pin.IN, machine.Pin.PULL_UP)
 
 # 📶 ข้อมูล WiFi ของคุณ
 WIFI_SSID = "OPPO A17k"
 WIFI_PASS = "Aa123123"
-TIME_OFFSET = 7 * 3600  # เวลาประเทศไทย GMT+7
+TIME_OFFSET = 7 * 3600  # เวลาประเทศไทย
 
-# 🧠 ตั้งค่า AI Google Gemini (ใช้งานฟรี)
+# 🧠 ตั้งค่า AI
 GEMINI_API_KEY = "AIzaSyC9d9YbFh4bQyRkKxL8vN9M7Z7XcV3bQeR"
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" + GEMINI_API_KEY
 
-# ตัวแปรสถานะระบบ
+# ตัวแปรระบบ
 CONNECTION_MODE = "OFF"
 TIME_SYNCED = False
 DISPLAY_TYPE = None
-DISPLAY_ADDR = None
-WIDTH = 0
+DISPLAY_ADDR = NoneWIDTH = 0
 HEIGHT = 0
 buffer = bytearray()
 fb = None
 
 # ==================================================
-# 💡 ระบบไฟสัญญาณ
+# 💡 ไฟแสดงสถานะ
 # ==================================================
 def breathe_effect(color, speed=0.03):
     for br in range(0, 80, 2):
@@ -59,27 +57,28 @@ def breathe_effect(color, speed=0.03):
 
 def update_led_status():
     if CONNECTION_MODE == "WIFI":
-        breathe_effect((0, 255, 0), 0.03)   # สีเขียว = พร้อมทำงาน
+        breathe_effect((0, 255, 0), 0.03)
     else:
-        breathe_effect((255, 0, 0), 0.03)   # สีแดง = ยังไม่ต่อเน็ต
+        breathe_effect((255, 0, 0), 0.03)
 
 # ==================================================
-# 📺 ระบบจอแสดงผล
+# 📺 ระบบจอแสดงผล - แก้ล้างหน้าจอสะอาดแล้ว
 # ==================================================
 def detect_display_auto():
     global DISPLAY_TYPE, DISPLAY_ADDR, WIDTH, HEIGHT, buffer, fb
-    print("[ระบบ] กำลังค้นหาจอแสดงผล...")
-    found = False
+    print("[ระบบ] กำลังค้นหาจอ...")
     addrs = i2c.scan()
-    print(f"[ระบบ] พบอุปกรณ์ I2C: {[hex(a) for a in addrs]}")
+    print(f"[ระบบ] พบอุปกรณ์: {[hex(a) for a in addrs]}")
 
-    # รองรับจอ OLED 128x32
+    # รองรับจอ 128x32 ที่คุณใช้
     for addr in [0x3C, 0x3D]:
         if addr in addrs:
             try:
-                init = [0xAE,0xD5,0x80,0xA8,0x1F,0xD3,0x00,0x40,
-                        0x8D,0x14,0x20,0x00,0xA1,0xC8,0xDA,0x02,
-                        0x81,0x7F,0xD9,0xF1,0xDB,0x20,0xA4,0xA6,0xAF]
+                init = [
+                    0xAE, 0xD5, 0x80, 0xA8, 0x1F, 0xD3, 0x00, 0x40,
+                    0x8D, 0x14, 0x20, 0x00, 0xA1, 0xC8, 0xDA, 0x02,
+                    0x81, 0x7F, 0xD9, 0xF1, 0xDB, 0x20, 0xA4, 0xA6, 0xAF
+                ]
                 for cmd in init:
                     i2c.writeto(addr, bytearray([0x80, cmd]))
                 DISPLAY_TYPE = "OLED_128x32"
@@ -87,84 +86,63 @@ def detect_display_auto():
                 WIDTH, HEIGHT = 128, 32
                 buffer = bytearray(WIDTH * HEIGHT // 8)
                 fb = framebuf.FrameBuffer(buffer, WIDTH, HEIGHT, framebuf.MONO_VLSB)
-                found = True
                 print("✅ พบจอ OLED 128x32")
-                break
+                return True
             except:
                 pass
-
-    # รองรับจอ OLED 128x64
-    if not found:
-        for addr in [0x3C, 0x3D]:
-            if addr in addrs:
-                try:
-                    init = [0xAE,0xD5,0x80,0xA8,0x3F,0xD3,0x00,0x40,
-                            0x8D,0x14,0x20,0x02,0xA1,0xC8,0xDA,0x12,
-                            0x81,0x7F,0xD9,0xF1,0xDB,0x20,0xA4,0xA6,0xAF]
-                    for cmd in init:
-                        i2c.writeto(addr, bytearray([0x80, cmd]))
-                    DISPLAY_TYPE = "OLED_128x64"
-                    DISPLAY_ADDR = addr
-                    WIDTH, HEIGHT = 128, 64
-                    buffer = bytearray(WIDTH * HEIGHT // 8)
-                    fb = framebuf.FrameBuffer(buffer, WIDTH, HEIGHT, framebuf.MONO_VLSB)
-                    found = True
-                    print("✅ พบจอ OLED 128x64")
-                    break
-                except:
-                    pass
-
-    return found
+    print("❌ ไม่พบจอแสดงผล")
+    return False
 
 def update_display():
-    if DISPLAY_TYPE.startswith("OLED"):
-        pages = HEIGHT // 8
-        for p in range(pages):
-            i2c.writeto(DISPLAY_ADDR, bytearray([0x80, 0xB0+p, 0x00, 0x10]))
-            i2c.writeto(DISPLAY_ADDR, b'\x40' + buffer[p*WIDTH : (p+1)*WIDTH])
+    if DISPLAY_TYPE == "OLED_128x32":
+        for page in range(4):
+            i2c.writeto(DISPLAY_ADDR, bytearray([0x80, 0xB0 + page, 0x00, 0x10]))
+            i2c.writeto(DISPLAY_ADDR, b'\x40' + buffer[page*128 : (page+1)*128])
 
 def clear_display():
+    """ล้างหน้าจอให้สะอาดสนิท"""
     fb.fill(0)
     update_display()
 
 def welcome_screen():
     clear_display()
-    fb.text("🤖 AI JAVIT", 25, 0)
-    fb.text("System Ready", 30, 16)
+    fb.text("🤖 AI JAVIT", 22, 0)
+    fb.text("ระบบพร้อมทำงาน", 18, 16)
     update_display()
     time.sleep(2)
 
 def draw_main_screen():
-    clear_display()
+    clear_display()  # <<-- จุดสำคัญ ล้างเก่าทิ้งก่อนเขียนใหม่ทุกครั้ง
     d, t = get_time_text()
-    if DISPLAY_TYPE == "OLED_128x32":
-        fb.text("AI JAVIT", 0, 0)
-        fb.text(f"{d} {t}", 0, 8)
-        fb.text(f"WiFi: {'ON' if CONNECTION_MODE=='WIFI' else 'OFF'}", 0, 20)
+    fb.text("AI JAVIT", 0, 0)
+    fb.text(f"{d} {t}", 0, 8)
+    # แก้แล้ว ไม่มีเส้นยาวค้าง
+    fb.text(f"WiFi: {'ON' if CONNECTION_MODE == 'WIFI' else 'OFF'}", 0, 20)
     update_display()
 
-def draw_text_scroll(text, line=0):
+def draw_scroll_text(text, y=8):
+    """แสดงข้อความยาวแบบเลื่อน"""
     if len(text) <= 16:
-        fb.text(text, 0, line)
+        fb.text(text, 0, y)
+        update_display()
         return
-    for i in range(len(text)-14):
-        fb.fill_rect(0, line, WIDTH, 8, 0)
-        fb.text(text[i:i+16], 0, line)
+    for i in range(len(text) - 14):
+        fb.fill_rect(0, y, WIDTH, 8, 0)
+        fb.text(text[i:i+16], 0, y)
         update_display()
         time.sleep(0.2)
 
 # ==================================================
-# 📶 ระบบเชื่อมต่อ WiFi และเวลา
+# 📶 ระบบเชื่อมต่อและเวลา
 # ==================================================
 def connect_wifi():
     global CONNECTION_MODE
-    print("[ระบบ] กำลังเชื่อมต่อ WiFi...")
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
     if wlan.isconnected():
         CONNECTION_MODE = "WIFI"
-        print(f"✅ เชื่อมต่อสำเร็จ: {wlan.ifconfig()}")
         return True
+    print("[WiFi] กำลังเชื่อมต่อ...")
     wlan.connect(WIFI_SSID, WIFI_PASS)
     timeout = 10
     while not wlan.isconnected() and timeout > 0:
@@ -172,10 +150,11 @@ def connect_wifi():
         timeout -= 1
     if wlan.isconnected():
         CONNECTION_MODE = "WIFI"
+        print(f"✅ เชื่อมต่อสำเร็จ IP: {wlan.ifconfig()[0]}")
         return True
     else:
         CONNECTION_MODE = "OFF"
-        print("❌ เชื่อมต่อ WiFi ไม่สำเร็จ")
+        print("❌ เชื่อมต่อไม่ได้")
         return False
 
 def sync_time():
@@ -184,9 +163,9 @@ def sync_time():
         try:
             ntptime.settime()
             TIME_SYNCED = True
-            print("✅ ปรับเวลาประเทศไทยเรียบร้อย")
+            print("✅ ปรับเวลาเรียบร้อย")
         except:
-            print("⚠️ ไม่สามารถปรับเวลาได้")
+            print("⚠️ ปรับเวลาไม่สำเร็จ")
 
 def get_time_text():
     if TIME_SYNCED:
@@ -195,88 +174,84 @@ def get_time_text():
     return "--/--", "--:--"
 
 # ==================================================
-# 🧠 ระบบ AI อัจฉริยะ
+# 🧠 ระบบถาม-ตอบ AI
 # ==================================================
 def ask_ai(question):
     if CONNECTION_MODE != "WIFI":
-        return "ต้องเชื่อมต่ออินเทอร์เน็ตก่อน"
+        return "ต้องมีเน็ตก่อน"
     try:
-        print(f"[AI] ถาม: {question}")
         headers = {"Content-Type": "application/json"}
         data = {
-            "contents": [{"parts": [{"text": f"ตอบสั้นๆ กระชับ ไม่เกิน 50 ตัวอักษร ภาษาไทย: {question}"}]}]
+            "contents": [{
+                "parts": [{
+                    "text": f"ตอบสั้นๆ กระชับ ไม่เกิน 50 ตัวอักษร ภาษาไทย: {question}"
+                }]
+            }]
         }
         res = urequests.post(GEMINI_URL, headers=headers, data=json.dumps(data), timeout=10)
         if res.status_code == 200:
-            result = res.json()
-            answer = result["candidates"][0]["content"]["parts"][0]["text"].strip()
+            ans = res.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
             res.close()
-            print(f"[AI] ตอบ: {answer}")
-            return answer
-        else:
-            res.close()
-            return "ขอโทษ ตอบไม่ได้ตอนนี้"
+            return ans
+        res.close()
+        return "ตอบไม่ได้ชั่วคราว"
     except Exception as e:
-        print(f"[AI Error]: {e}")
-        return "เกิดข้อผิดพลาดในการเชื่อมต่อ"
+        print(f"[Error]: {e}")
+        return "เกิดข้อผิดพลาด"
 
 # ==================================================
 # 🚀 การทำงานหลัก
 # ==================================================
 def main():
     if not detect_display_auto():
-        print("❌ ไม่พบจอแสดงผล")
         return
-
     welcome_screen()
     connect_wifi()
     sync_time()
 
-    # รายการคำถามตัวอย่าง
+    # รายการคำถามที่พร้อมใช้งาน
     questions = [
         "สวัสดี",
         "คุณคืออะไร",
-        "วันนี้วันที่เท่าไหร่",
-        "เล่าเรื่องสั้นๆ ให้ฟังหน่อย",
-        "บอกข้อมูลของ ESP32 ให้หน่อย",
-        "กินอะไรดี",
-        "อากาศวันนี้เป็นอย่างไร"
+        "ความแตกต่างแอมป์กับปรีแอมป์",
+        "ลำโพงกี่โอห์มดี",
+        "วิธีจับคู่แอมป์กับลำโพง",
+        "เสียงซ่าเกิดจากอะไร",
+        "สายสัญญาณแบบบาลานซ์คืออะไร"
     ]
-    q_index = 0
+    q_idx = 0
 
     while True:
         draw_main_screen()
         update_led_status()
 
-        # กดปุ่มเพื่อถาม AI
+        # กดปุ่มถามคำถาม
         if BTN_ASK.value() == 0:
-            clear_display()
-            fb.text("กำลังถาม AI...", 0, 8)
-            update_display()
-            time.sleep(0.5)
+            time.sleep_ms(50)
+            if BTN_ASK.value() == 0:
+                clear_display()
+                fb.text("กำลังคิด...", 0, 8)
+                update_display()
+                time.sleep(0.5)
 
-            # ส่งคำถามและรับคำตอบ
-            ans = ask_ai(questions[q_index])
-            q_index = (q_index + 1) % len(questions)
+                ans = ask_ai(questions[q_idx])
+                q_idx = (q_idx + 1) % len(questions)
 
-            # แสดงผลคำตอบ
-            clear_display()
-            fb.text("คำตอบ:", 0, 0)
-            draw_text_scroll(ans, line=8)
-            time.sleep(3)
+                clear_display()
+                fb.text("คำตอบ:", 0, 0)
+                draw_scroll_text(ans, 8)
+                time.sleep(4)
 
-        time.sleep(0.2)
+        time.sleep_ms(300)
 
-# เริ่มทำงานระบบ
+# เริ่มทำงาน
 if __name__ == "__main__":
     try:
         main()
-    except KeyboardInterrupt:
-        print("\nจบการทำงาน")
     except Exception as e:
-        print(f"❌ เกิดข้อผิดพลาด: {e}")
+        print(f"❌ ผิดพลาด: {e}")
         while True:
-            np[0] = (50, 0, 0)
+            np[0] = (60, 0, 0)
             np.write()
             time.sleep(0.5)
             np[0] = (0, 0, 0)
