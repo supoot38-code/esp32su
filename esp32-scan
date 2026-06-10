@@ -1,0 +1,160 @@
+from machine import Pin, SPI
+import time
+
+# ======================
+# กำหนดขา ตรงตามตาราง
+# ======================
+TFT_CS   = 10
+TFT_RST  = 9
+TFT_DC   = 8
+TFT_SCK  = 7
+TFT_MOSI = 6
+TFT_BL   = 4
+
+TOUCH_MISO = 5
+
+# ======================
+# สเปกและสี
+# ======================
+TFT_WIDTH  = 320
+TFT_HEIGHT = 480
+
+BLACK   = 0x0000
+WHITE   = 0xFFFF
+RED     = 0xF800
+GREEN   = 0x07E0
+BLUE    = 0x001F
+
+# ======================
+# เริ่มต้นฮาร์ดแวร์
+# ======================
+print("=== เตรียมฮาร์ดแวร์ ===")
+# ลดความเร็วลงเหลือ 12MHz เพื่อความเสถียร
+spi = SPI(1, baudrate=12_000_000, polarity=0, phase=0,
+          sck=Pin(TFT_SCK, Pin.OUT),
+          mosi=Pin(TFT_MOSI, Pin.OUT),
+          miso=Pin(TOUCH_MISO, Pin.IN))
+
+cs_tft = Pin(TFT_CS, Pin.OUT, value=1)
+dc     = Pin(TFT_DC, Pin.OUT, value=1)
+rst    = Pin(TFT_RST, Pin.OUT, value=1)
+bl     = Pin(TFT_BL, Pin.OUT, value=0)
+print("✅ พร้อมแล้ว")
+
+# ======================
+# ฟังก์ชันพื้นฐาน
+# ======================
+def write_cmd(cmd):
+    dc.value(0)
+    cs_tft.value(0)
+    spi.write(bytes([cmd]))
+    cs_tft.value(1)
+
+def write_data(data):
+    dc.value(1)
+    cs_tft.value(0)
+    if isinstance(data, int):
+        spi.write(bytes([data]))
+    else:
+        spi.write(data)
+    cs_tft.value(1)
+
+def set_window(x0, y0, x1, y1):
+    write_cmd(0x2A)
+    write_data(x0 >> 8); write_data(x0 & 0xFF)
+    write_data(x1 >> 8); write_data(x1 & 0xFF)
+    write_cmd(0x2B)
+    write_data(y0 >> 8); write_data(y0 & 0xFF)
+    write_data(y1 >> 8); write_data(y1 & 0xFF)
+    write_cmd(0x2C)
+
+def fill_screen(color):
+    set_window(0, 0, TFT_WIDTH - 1, TFT_HEIGHT - 1)
+    cs_tft.value(0)
+    dc.value(1)
+    # สลับลำดับไบต์สีอีกแบบที่ใช้กับ ILI9488
+    buf = bytes([color & 0xFF, (color >> 8) & 0xFF]) * TFT_WIDTH
+    for _ in range(TFT_HEIGHT):
+        spi.write(buf)
+    cs_tft.value(1)
+
+# ======================
+# ทดสอบทุกชุดคำสั่งเริ่มต้น
+# ======================
+def test_all_init():
+    init_commands = [
+        {
+            "name": "ILI9486",
+            "cmds": [
+                (0x11, 150),
+                (0x36, 0x48),
+                (0x3A, 0x55),
+                (0x2C, None),
+                (0x29, 100)
+            ]
+        },
+        {
+            "name": "ILI9488",
+            "cmds": [
+                (0x11, 200),
+                (0x36, 0xE8),
+                (0x3A, 0x66), # รูปแบบสี 18 บิต
+                (0xF0, 0x01),
+                (0xF6, 0x00),
+                (0x29, 100)
+            ]
+        },
+        {
+            "name": "ST7796",
+            "cmds": [
+                (0x11, 150),
+                (0x36, 0x48),
+                (0x3A, 0x55),
+                (0xB0, 0xC0),
+                (0x29, 100)
+            ]
+        }
+    ]
+
+    for init_set in init_commands:
+        print(f"\n🔄 กำลังทดสอบชุดคำสั่ง: {init_set['name']}")
+        # รีเซ็ตจอทุกครั้ง
+        rst.value(0); time.sleep_ms(50)
+        rst.value(1); time.sleep_ms(150)
+        bl.value(1)
+
+        # ส่งชุดคำสั่ง
+        for cmd, data in init_set["cmds"]:
+            write_cmd(cmd)
+            if isinstance(data, int):
+                write_data(data)
+                time.sleep_ms(20)
+            elif isinstance(data, int) and data > 10:
+                time.sleep_ms(data)
+
+        # ทดสอบสี
+        print("  → ทดสอบสีแดง")
+        fill_screen(RED)
+        time.sleep(1.5)
+        print("  → ทดสอบสีเขียว")
+        fill_screen(GREEN)
+        time.sleep(1.5)
+        print("  → ทดสอบสีน้ำเงิน")
+        fill_screen(BLUE)
+        time.sleep(1.5)
+
+    print("\n===== จบการทดสอบทุกรูปแบบ =====")
+    print("💡 ดูว่ามีรอบไหนสีเปลี่ยนจากขาวบ้างไหมครับ")
+
+# ======================
+# รัน
+# ======================
+if __name__ == "__main__":
+    try:
+        test_all_init()
+    except Exception as e:
+        print(f"\n❌ ผิดพลาด: {e}")
+    finally:
+        fill_screen(BLACK)
+        print("\n✅ จบการทำงาน")
+
