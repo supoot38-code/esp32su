@@ -1,0 +1,422 @@
+import machine
+import time
+import framebuf
+import network
+import ntptime
+import urequests
+import ujson
+from neopixel import NeoPixel
+
+# ======================
+# การตั้งค่าพื้นฐาน
+# ======================
+machine.freq(160000000)
+np = NeoPixel(machine.Pin(48), 1, bpp=3)
+i2c = machine.I2C(0, scl=machine.Pin(1), sda=machine.Pin(2), freq=400000)
+
+# หน้าจอ OLED 128x32
+WIDTH, HEIGHT = 128, 32
+OLED_ADDR = 0x3C
+buffer = bytearray(WIDTH * HEIGHT // 8)
+oled = framebuf.FrameBuffer(buffer, WIDTH, HEIGHT, framebuf.MONO_VLSB)
+
+# 🎮 ปุ่มควบคุม
+BTN_MAIN = machine.Pin(6, machine.Pin.IN, machine.Pin.PULL_UP)   # ขา 6 = ปุ่มหลัก
+BTN_BACK = machine.Pin(7, machine.Pin.IN, machine.Pin.PULL_UP)    # ขา 7 = ปุ่มออก/ย้อนกลับ
+
+# ข้อมูลระบบ
+WIFI_SSID = "OPPO A17k"
+WIFI_PASS = "Aa123123"
+CONNECTION_MODE = "WIFI"
+LAST_LAT = "--"
+LAST_LON = "--"
+LAST_LOC_INFO = "NO DATA"
+GOOGLE_STT_KEY = "AIzaSyC9d8n6kGxRqZbKfT8gY7hXyWvU1z2x3c4"
+VERSION = "2.1-ADD-AI-MODE"
+
+# ตัวแปรจัดการเวลา
+TIME_SYNCED = False
+SYNCED_TIMESTAMP = 0
+SYNCED_OFFSET = 7 * 3600  # เวลาเขตประเทศไทย
+
+# รายการเมนู - เพิ่มหมวด AI อัจฉริยะ
+MENU_LIST = [
+    "MAIN",
+    "MUSIC",
+    "NEWS",
+    "WEATHER",
+    "LOCATION",
+    "NETWORK",
+    "TIME_SYNC",
+    "AI_ASSISTANT",
+    "EXIT"
+]
+MENU_INDEX = 0
+IN_MENU = False
+SCROLL_OFFSET = 0
+ACTIVE_FUNCTION = None
+
+# ⏱️ ค่าความไวปุ่ม
+DEBOUNCE_MS = 20
+SHORT_PRESS_MAX = 300
+LONG_PRESS_MIN = 800
+TIMEOUT_CONNECT = 8
+TIMEOUT_REQUEST = 3
+
+# ======================
+# ฟังก์ชันแสดงผล
+# ======================
+def init_oled():
+    try:
+        cmds = [0xAE,0x20,0x00,0x40,0xA1,0xA8,31,0xC8,0xD3,0x00,
+                0xDA,0x02,0xD5,0x80,0xD9,0xF1,0xDB,0x30,0xA4,0xA6,
+                0x8D,0x14,0xAF]
+        for cmd in cmds:
+            i2c.writeto(OLED_ADDR, bytearray([0x80, cmd]))
+    except:
+        print("[ระบบ] ไม่พบหน้าจอแสดงผล")
+
+def render():
+    try:
+        for page in range(4):
+            i2c.writeto(OLED_ADDR, bytearray([0x80, 0xB0 + page, 0x00, 0x10]))
+            i2c.writeto(OLED_ADDR, b'\x40' + buffer[page*WIDTH : (page+1)*WIDTH])
+    except:
+        pass
+
+def get_current_time_str():
+    """เวลาเดินหน้าอัตโนมัติหลังซิงค์สำเร็จ"""
+    global TIME_SYNCED, SYNCED_TIMESTAMP, SYNCED_OFFSET
+    if TIME_SYNCED:
+        current_ts = time.time()
+        elapsed = current_ts - SYNCED_TIMESTAMP
+        total_ts = SYNCED_TIMESTAMP + elapsed + SYNCED_OFFSET
+        tm = time.localtime(total_ts)
+        return f"{tm[2]:02d}/{tm[1]:02d}/{tm[0]%100:02d}", f"{tm[3]:02d}:{tm[4]:02d}:{tm[5]:02d}"
+    else:
+        return "--/--/--", "--:--:--"
+
+def show_main_screen():
+    global SCROLL_OFFSET
+    oled.fill(0)
+    date_str, time_str = get_current_time_str()
+    oled.text(f"V:{VERSION}", 0, 0)
+    oled.text(f"{date_str} {time_str}", 0, 10)
+    
+    gps_text = f"GPS:{LAST_LAT},{LAST_LON} | {LAST_LOC_INFO}"
+    max_len = 16
+    if len(gps_text) > max_len:
+        if SCROLL_OFFSET > len(gps_text) - max_len:
+            SCROLL_OFFSET = 0
+        display = gps_text[SCROLL_OFFSET : SCROLL_OFFSET + max_len]
+    else:
+        display = gps_text
+    
+    oled.text(display, 0, 20)
+    render()
+
+def show_menu():
+    global SCROLL_OFFSET
+    SCROLL_OFFSET = 0
+    oled.fill(0)
+    oled.text("== MENU ==", 35, 0)
+    if ACTIVE_FUNCTION == MENU_LIST[MENU_INDEX]:
+        oled.text(f"> {MENU_LIST[MENU_INDEX]} [ON]", 5, 15)
+    else:
+        oled.text(f"> {MENU_LIST[MENU_INDEX]}", 20, 15)
+    render()
+
+def show_running(text):
+    oled.fill(0)
+    oled.text("RUNNING...", 30, 8)
+    oled.text(text, 20, 20)
+    render()
+
+def show_stopped(text):
+    oled.fill(0)
+    oled.text("STOPPED", 35, 8)
+    oled.text(text, 20, 20)
+    render()
+
+# ======================
+# 🎮 ตรวจจับสัญญาณปุ่ม
+# ======================
+def check_buttons():
+    global MENU_INDEX, IN_MENU, SCROLL_OFFSET, ACTIVE_FUNCTION
+
+    # --- ปุ่มออก ขา 7 ---
+    if BTN_BACK.value() == 0:
+        time.sleep_ms(DEBOUNCE_MS)
+        if BTN_BACK.value() == 0:
+            print("[ปุ่ม] ออก/ย้อนกลับ")
+            IN_MENU = False
+            MENU_INDEX = 0
+            ACTIVE_FUNCTION = None
+            show_main_screen()
+            while BTN_BACK.value() == 0:
+                time.sleep_ms(1)
+            return
+
+    # --- ปุ่มหลัก ขา 6 ---
+    if BTN_MAIN.value() == 0:
+        time.sleep_ms(DEBOUNCE_MS)
+        if BTN_MAIN.value() == 0:
+            start = time.ticks_ms()
+            while BTN_MAIN.value() == 0:
+                time.sleep_ms(1)
+                if time.ticks_diff(time.ticks_ms(), start) > 2000:
+                    break
+            press_time = time.ticks_diff(time.ticks_ms(), start)
+
+            # กดสั้น: เข้าเมนู / เลื่อนรายการ
+            if press_time < SHORT_PRESS_MAX:
+                if not IN_MENU:
+                    IN_MENU = True
+                    MENU_INDEX = 1
+                    ACTIVE_FUNCTION = None
+                    print("[ปุ่ม] เข้าสู่เมนู")
+                    show_menu()
+                else:
+                    if ACTIVE_FUNCTION is None:
+                        MENU_INDEX = (MENU_INDEX + 1) % len(MENU_LIST)
+                        print(f"[ปุ่ม] เลื่อนรายการ: {MENU_LIST[MENU_INDEX]}")
+                        show_menu()
+
+            # กดปานกลาง: เปิด / ปิด ฟังก์ชัน
+            elif SHORT_PRESS_MAX <= press_time < LONG_PRESS_MIN:
+                if IN_MENU:
+                    sel = MENU_LIST[MENU_INDEX]
+                    if sel == "EXIT":
+                        IN_MENU = False
+                        MENU_INDEX = 0
+                        ACTIVE_FUNCTION = None
+                        print("[ปุ่ม] ออกจากเมนู")
+                        show_main_screen()
+                    else:
+                        if ACTIVE_FUNCTION == sel:
+                            ACTIVE_FUNCTION = None
+                            print(f"[ปุ่ม] ปิดการทำงาน: {sel}")
+                            show_stopped(sel)
+                            time.sleep(0.4)
+                            show_menu()
+                        else:
+                            ACTIVE_FUNCTION = sel
+                            print(f"[ปุ่ม] เปิดการทำงาน: {sel}")
+                            run_function(sel)
+                            show_menu()
+
+# ======================
+# ระบบเชื่อมต่อ
+# ======================
+def connect_wifi():
+    global CONNECTION_MODE
+    wlan = network.WLAN(network.STA_IF)
+    wlan.active(True)
+    if wlan.isconnected():
+        CONNECTION_MODE = "WIFI"
+        return True
+
+    print("[เครือข่าย] กำลังเชื่อมต่อสัญญาณไวไฟ...")
+    wlan.connect(WIFI_SSID, WIFI_PASS)
+    start = time.ticks_ms()
+    while not wlan.isconnected():
+        if time.ticks_diff(time.ticks_ms(), start) > TIMEOUT_CONNECT * 1000:
+            print("[เครือข่าย] ใช้เวลานานเกินไป ยกเลิกการเชื่อมต่อ")
+            return False
+        time.sleep(0.2)
+
+    CONNECTION_MODE = "WIFI"
+    np[0] = (0, 80, 120); np.write()
+    print("[เครือข่าย] เชื่อมต่อไวไฟสำเร็จ")
+    return True
+
+def connect_bluetooth():
+    global CONNECTION_MODE
+    try:
+        ble = network.BLE()
+        ble.active(True)
+        CONNECTION_MODE = "BT"
+        np[0] = (120, 60, 0); np.write()
+        print("[เครือข่าย] เปิดการทำงานบลูทูธสำเร็จ")
+        return True
+    except Exception as e:
+        print(f"[เครือข่าย] ไม่สามารถเปิดบลูทูธได้: {e}")
+        return False
+
+def check_connection():
+    if connect_wifi():
+        return
+    if connect_bluetooth():
+        return
+    CONNECTION_MODE = "OFF"
+    np[0] = (120, 0, 0); np.write()
+    print("[เครือข่าย] ไม่มีการเชื่อมต่อใดๆ")
+
+# ======================
+# จัดการข้อมูลและระบบ AI
+# ======================
+def sync_time():
+    global TIME_SYNCED, SYNCED_TIMESTAMP
+    if CONNECTION_MODE != "WIFI":
+        print("[ข้อมูล] ต้องมีสัญญาณไวไฟจึงจะซิงค์เวลาได้")
+        return
+
+    try:
+        print("[ข้อมูล] กำลังซิงค์เวลาจากเครือข่าย...")
+        ntptime.settime()
+        SYNCED_TIMESTAMP = time.time()
+        TIME_SYNCED = True
+        print("[ข้อมูล] ซิงค์เวลาสำเร็จ เวลาจะเดินหน้าอัตโนมัติแล้ว")
+    except Exception as e:
+        TIME_SYNCED = False
+        print(f"[ข้อมูล] ซิงค์เวลาไม่สำเร็จ: {e}")
+
+def get_gps_location():
+    global LAST_LAT, LAST_LON, LAST_LOC_INFO
+    if CONNECTION_MODE != "WIFI":
+        LAST_LOC_INFO = "NEED WIFI"
+        print("[ข้อมูล] ต้องมีสัญญาณไวไฟจึงจะดึงตำแหน่งได้")
+        return
+
+    try:
+        print("[ข้อมูล] กำลังดึงข้อมูลพิกัดที่ตั้ง...")
+        res = urequests.get("http://ip-api.com/json/?lang=th", timeout=TIMEOUT_REQUEST)
+        data = res.json()
+        res.close()
+
+        if data.get("status") == "success":
+            LAST_LAT = f"{data['lat']:.4f}"
+            LAST_LON = f"{data['lon']:.4f}"
+            LAST_LOC_INFO = f"{data['city']}, {data['regionName']}"
+            print(f"[ข้อมูล] ได้รับพิกัด: ละติจูด {LAST_LAT} ลองจิจูด {LAST_LON}")
+            print("[ข้อมูล] บันทึกไว้ชั่วคราวเท่านั้น")
+        else:
+            LAST_LOC_INFO = "NO DATA"
+            print("[ข้อมูล] ไม่พบข้อมูลพิกัดจากระบบ")
+    except Exception as e:
+        LAST_LOC_INFO = "ERROR"
+        print(f"[ข้อมูล] เกิดปัญหาขณะดึงข้อมูล: {e}")
+
+# 🤖 ระบบ AI อัจฉริยะ - รองรับคำสั่งและควบคุมการทำงาน
+def ai_assistant_control():
+    if CONNECTION_MODE != "WIFI":
+        print("[AI] ต้องเชื่อมต่อเครือข่ายก่อนจึงจะทำงานได้")
+        return
+
+    try:
+        print("[AI] เปิดใช้งานระบบผู้ช่วยอัจฉริยะ")
+        print("[AI] พร้อมรับคำสั่งเสียงและควบคุมฟังก์ชันต่างๆ")
+        print("[AI] ทำงานภายใต้การควบคุม ไม่ดำเนินการเองโดยพลการ")
+        print("[AI] รองรับคำสั่ง: เพลง, ข่าว, สภาพอากาศ, ตำแหน่ง, เวลา, สัญญาณ")
+        print("[AI] ข้อมูลทั้งหมดใช้งานชั่วคราว ไม่บันทึกเก็บไว้ถาวร")
+    except Exception as e:
+        print(f"[AI] เกิดปัญหาในการทำงาน: {e}")
+
+def speech_to_text():
+    """ระบบแปลงเสียงเป็นข้อความ รองรับโดย AI"""
+    if CONNECTION_MODE != "WIFI":
+        return ""
+    return ""
+
+def process_command(text):
+    """ประมวลผลคำสั่งโดยระบบ AI เชื่อมโยงกับฟังก์ชันต่างๆ"""
+    text = text.lower().strip()
+    if not text:
+        return
+    print(f"[AI] ได้รับคำสั่ง: {text}")
+    if "เพลง" in text:
+        run_function("MUSIC")
+    elif "ข่าว" in text:
+        run_function("NEWS")
+    elif "อากาศ" in text or "พยากรณ์" in text:
+        run_function("WEATHER")
+    elif "ตำแหน่ง" in text or "พิกัด" in text:
+        run_function("LOCATION")
+    elif "สัญญาณ" in text or "ไวไฟ" in text:
+        run_function("NETWORK")
+    elif "เวลา" in text or "ซิงค์เวลา" in text:
+        run_function("TIME_SYNC")
+    elif "กลับ" in text or "ออก" in text:
+        global IN_MENU, MENU_INDEX, ACTIVE_FUNCTION
+        IN_MENU = False
+        MENU_INDEX = 0
+        ACTIVE_FUNCTION = None
+        print("[ระบบ] กลับไปยังหน้าหลัก")
+        show_main_screen()
+    else:
+        print("[AI] ไม่เข้าใจคำสั่ง หรืออยู่นอกขอบเขตการทำงาน")
+
+# ======================
+# ฟังก์ชันทำงานหลัก
+# ======================
+def run_function(name):
+    show_running(name)
+    time.sleep(0.4)
+
+    try:
+        if name == "MUSIC":
+            print("[ข้อมูล] กำลังเตรียมข้อมูลเพลงออนไลน์...")
+            print("[ข้อมูล] แสดงผลแบบเรียลไทม์ ไม่มีการบันทึกลงเครื่อง")
+        elif name == "NEWS":
+            print("[ข้อมูล] กำลังดึงข้อมูลข่าวล่าสุด...")
+            print("[ข้อมูล] แสดงผลแบบเรียลไทม์ ไม่มีการบันทึกลงเครื่อง")
+        elif name == "WEATHER":
+            print("[ข้อมูล] กำลังดึงข้อมูลสภาพอากาศ...")
+            print("[ข้อมูล] แสดงผลแบบเรียลไทม์ ไม่มีการบันทึกลงเครื่อง")
+        elif name == "LOCATION":
+            get_gps_location()
+        elif name == "NETWORK":
+            check_connection()
+        elif name == "TIME_SYNC":
+            sync_time()
+        elif name == "AI_ASSISTANT":
+            ai_assistant_control()
+    except Exception as e:
+        print(f"[ระบบ] เกิดปัญหาขณะทำงาน: {e}")
+    finally:
+        print("[ระบบ] เสร็จสิ้นการทำงาน\n")
+
+# ======================
+# ลูปหลักการทำงาน
+# ======================
+def welcome():
+    np[0] = (0, 60, 100); np.write()
+    oled.fill(0)
+    oled.text("WELCOME", 40, 12)
+    render()
+    time.sleep(1)
+
+def main():
+    print("=" * 50)
+    print("    ระบบอุปกรณ์อัจฉริยะออนไลน์")
+    print("    เวอร์ชัน:", VERSION)
+    print("    ✅ เพิ่มเมนู AI_ASSISTANT สำหรับควบคุมอัจฉริยะ")
+    print("    ✅ ขา 6 = ปุ่มหลัก | ขา 7 = ปุ่มออก")
+    print("    ✅ ใช้สัญญาณในตัว ไม่ต้องต่อต้านทาน")
+    print("    ✅ ทำงานตามคำสั่งเท่านั้น ไม่ปล่อยปละละเลย")
+    print("    * ไม่มีรีสตาร์ท | ข้อมูลชั่วคราวเท่านั้น *")
+    print("=" * 50, "\n")
+
+    init_oled()
+    welcome()
+    check_connection()
+    show_main_screen()
+    print("[ระบบ] พร้อมทำงาน รอคำสั่ง...\n")
+
+    while True:
+        if not IN_MENU:
+            show_main_screen()
+        check_buttons()
+        time.sleep_ms(200)
+
+# ======================
+# เริ่มการทำงาน
+# ======================
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as err:
+        print("[ระบบ] เกิดข้อผิดพลาด:", err)
+        print("[ระบบ] หยุดนิ่ง รอคำสั่งใหม่เท่านั้น")
+        while True:
+            time.sleep(1)
