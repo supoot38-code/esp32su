@@ -1,0 +1,235 @@
+from machine import Pin, SPI
+import time
+
+# ==================================================
+# 📋 1. รายชุดขาที่เป็นไปได้ทั้งหมด
+# ==================================================
+PIN_SETS = [
+    {"cs":10, "rst":11, "dc":12, "sck":13, "mosi":14, "bl":2,  "note":"ชุด 1 - ทดสอบแรก"},
+    {"cs":10, "rst":9,  "dc":8,  "sck":7,  "mosi":6,  "bl":4,  "note":"ชุด 2 - อีกชุดที่นิยม"},
+    {"cs":5,  "rst":6,  "dc":7,  "sck":8,  "mosi":9,  "bl":10, "note":"ชุด 3"},
+    {"cs":15, "rst":16, "dc":17, "sck":18, "mosi":19, "bl":21, "note":"ชุด 4"},
+    {"cs":4,  "rst":5,  "dc":6,  "sck":7,  "mosi":8,  "bl":3,  "note":"ชุด 5"},
+    {"cs":3,  "rst":4,  "dc":5,  "sck":6,  "mosi":7,  "bl":2,  "note":"ชุด 6"},
+    {"cs":12, "rst":13, "dc":14, "sck":15, "mosi":16, "bl":17, "note":"ชุด 7"},
+    {"cs":18, "rst":19, "dc":21, "sck":22, "mosi":23, "bl":25, "note":"ชุด 8"},
+]
+
+# ==================================================
+# 📋 2. ชุดคำสั่งจอทุกรุ่นยอดนิยม
+# ==================================================
+DRIVERS = [
+    {
+        "name": "ILI9488",
+        "w": 320, "h": 480,
+        "color": "18bit",
+        "init": [
+            (0x11, 200),
+            (0x36, 0xC8),
+            (0x3A, 0x66),
+            (0xC0, [0x15,0x15]),
+            (0xC1, [0x41]),
+            (0xC5, [0x00,0x32,0x80]),
+            (0xB1, [0xA0,0x11]),
+            (0xB6, [0x1A,0x27]),
+            (0xE0, b'\x00\x03\x09\x08\x16\x0A\x3F\x78\x4C\x09\x0A\x08\x16\x1A\x0F'),
+            (0xE1, b'\x00\x16\x19\x03\x0F\x05\x32\x45\x46\x04\x0E\x0D\x35\x37\x0F'),
+            (0x2A, [0x00,0x00,0x01,0xDF]),
+            (0x2B, [0x00,0x00,0x01,0x3F]),
+            (0x29, 150)
+        ]
+    },
+    {
+        "name": "ILI9486",
+        "w": 320, "h": 480,
+        "color": "16bit",
+        "init": [
+            (0x11, 150),
+            (0x36, 0x48),
+            (0x3A, 0x55),
+            (0x2C, None),
+            (0x29, 150)
+        ]
+    },
+    {
+        "name": "ST7796",
+        "w": 320, "h": 480,
+        "color": "16bit",
+        "init": [
+            (0x11, 150),
+            (0x36, 0x48),
+            (0x3A, 0x55),
+            (0xB0, 0xC0),
+            (0xB6, [0x0A,0x82]),
+            (0xE0, b'\xF0\x09\x0b\x06\x04\x15\x2F\x54\x42\x3C\x17\x18\x29\x31'),
+            (0xE1, b'\xF0\x09\x0b\x06\x04\x03\x2D\x43\x42\x3B\x16\x17\x28\x30'),
+            (0x29, 150)
+        ]
+    },
+    {
+        "name": "ST7789",
+        "w": 240, "h": 320,
+        "color": "16bit",
+        "init": [
+            (0x11, 150),
+            (0x36, 0x00),
+            (0x3A, 0x55),
+            (0xB2, [0x0C,0x0C,0x00,0x33,0x33]),
+            (0xB7, 0x35),
+            (0xBB, 0x19),
+            (0xC0, 0x2C),
+            (0xC2, 0x01),
+            (0xC3, 0x12),
+            (0xC4, 0x20),
+            (0xC6, 0x0F),
+            (0xE0, b'\xD0\x08\x11\x08\x0C\x15\x39\x44\x51\x28\x12\x04\x17\x14'),
+            (0xE1, b'\xD0\x08\x10\x08\x06\x06\x39\x44\x51\x28\x10\x1C\x17\x1A'),
+            (0x29, 150)
+        ]
+    },
+    {
+        "name": "ST7735",
+        "w": 128, "h": 160,
+        "color": "16bit",
+        "init": [
+            (0x11, 120),
+            (0x36, 0x00),
+            (0x3A, 0x55),
+            (0xB1, [0x05,0x3A,0x3A]),
+            (0xB2, [0x05,0x3A,0x3A]),
+            (0xB3, [0x05,0x3A,0x3A,0x05,0x3A,0x3A]),
+            (0xB4, 0x03),
+            (0xC0, [0x62,0x02]),
+            (0xC1, 0xC0),
+            (0xC2, [0x0D,0x00]),
+            (0xC3, [0x8D,0x6A]),
+            (0xC4, [0x8D,0xEE]),
+            (0xC5, 0x0E),
+            (0xE0, b'\x10\x0E\x02\x03\x0E\x07\x02\x07\x0A\x12\x27\x37\x00\x0D\x0E\x10'),
+            (0xE1, b'\x10\x0E\x03\x03\x0F\x06\x02\x08\x0A\x13\x26\x36\x00\x0D\x0E\x10'),
+            (0x29, 120)
+        ]
+    },
+    {
+        "name": "GC9A01",
+        "w": 240, "h": 240,
+        "color": "16bit",
+        "init": [
+            (0x11, 120),
+            (0x36, 0x48),
+            (0x3A, 0x55),
+            (0xB2, [0x00,0x00,0x00,0x00,0x00]),
+            (0xB7, 0x35),
+            (0xBB, 0x19),
+            (0xC0, 0x2C),
+            (0xC2, 0x01),
+            (0xC3, 0x12),
+            (0xC4, 0x20),
+            (0xC6, 0x0F),
+            (0xD0, [0xA4,0xA1]),
+            (0xE0, b'\xD0\x00\x02\x07\x0A\x28\x32\x44\x42\x06\x0E\x12\x14\x17'),
+            (0xE1, b'\xD0\x00\x02\x07\x0A\x28\x31\x54\x47\x0E\x1C\x17\x1B\x1E'),
+            (0x29, 120)
+        ]
+    }
+]
+
+# ==================================================
+# 🛠️ ฟังก์ชันพื้นฐาน
+# ==================================================
+def lcd_cmd(spi, cs, dc, cmd):
+    dc.value(0)
+    cs.value(0)
+    spi.write(bytes([cmd]))
+    cs.value(1)
+
+def lcd_data(spi, cs, dc, data):
+    dc.value(1)
+    cs.value(0)
+    if isinstance(data, int):
+        spi.write(bytes([data]))
+    elif isinstance(data, (list, tuple)):
+        spi.write(bytes(data))
+    elif isinstance(data, bytes):
+        spi.write(data)
+    cs.value(1)
+
+def fill_test(spi, cs, dc, w, h, color_mode):
+    lcd_cmd(spi, cs, dc, 0x2A)
+    lcd_data(spi, cs, dc, [0,0, (w-1)>>8, (w-1)&0xFF])
+    lcd_cmd(spi, cs, dc, 0x2B)
+    lcd_data(spi, cs, dc, [0,0, (h-1)>>8, (h-1)&0xFF])
+    lcd_cmd(spi, cs, dc, 0x2C)
+
+    if color_mode == "16bit":
+        buf = b'\xF8\x00' * w  # สีแดง 16 บิต
+    else:
+        buf = b'\xFF\x00\x00' * w  # สีแดง 18 บิต
+
+    cs.value(0)
+    dc.value(1)
+    for _ in range(h):
+        spi.write(buf)
+    cs.value(1)
+
+# ==================================================
+# 🔍 ทดลองแต่ละชุด
+# ==================================================
+def test_one(pins, drv):
+    print(f"\n--- ทดลอง: {pins['note']} | รุ่น: {drv['name']} ---")
+    try:
+        cs   = Pin(pins["cs"],  Pin.OUT, 1)
+        rst  = Pin(pins["rst"], Pin.OUT, 1)
+        dc   = Pin(pins["dc"],  Pin.OUT, 0)
+        sck  = Pin(pins["sck"], Pin.OUT)
+        mosi = Pin(pins["mosi"],Pin.OUT, 0)
+        bl   = Pin(pins["bl"],  Pin.OUT, 0)
+
+        spi = SPI(1, baudrate=6_000_000, polarity=0, phase=0,
+                  firstbit=SPI.MSB, sck=sck, mosi=mosi)
+
+        # รีเซ็ต
+        rst.value(0); time.sleep_ms(50)
+        rst.value(1); time.sleep_ms(200)
+
+        # เริ่มต้นจอ
+        for cmd, val in drv["init"]:
+            lcd_cmd(spi, cs, dc, cmd)
+            if isinstance(val, int) and val > 10:
+                time.sleep_ms(val)
+            elif val is not None:
+                lcd_data(spi, cs, dc, val)
+                time.sleep_ms(5)
+
+        # เปิดไฟหลังจอและทาสี
+        bl.value(1)
+        time.sleep_ms(50)
+        fill_test(spi, cs, dc, drv["w"], drv["h"], drv["color"])
+
+        print(f"✅ เสร็จชุดนี้ → ดูที่จอ ถ้าเห็นสีแดง แปลว่าเจอแล้ว!")
+        print(f"💡 ขา: CS={pins['cs']}, RST={pins['rst']}, DC={pins['dc']}, SCK={pins['sck']}, MOSI={pins['mosi']}, BL={pins['bl']}")
+        print(f"💡 ชิป: {drv['name']}, สี: {drv['color']}")
+        time.sleep(2)
+
+        # ปิดก่อนชุดถัดไป
+        bl.value(0)
+        rst.value(0); time.sleep_ms(30)
+        rst.value(1); time.sleep_ms(50)
+
+    except Exception as e:
+        print(f"❌ ข้ามชุดนี้: {e}")
+        time.sleep_ms(50)
+
+# ==================================================
+# 🚀 เริ่มสแกนทั้งหมด
+# ==================================================
+def start_scan():
+    print("=== เริ่มสแกนหาขาและรุ่นจออัตโนมัติ ===")
+    print("💡 สังเกต: เมื่อไหร่เห็นสีแดงขึ้นมา แสดงว่าเจอค่าที่ถูกต้องแล้วครับ\n")
+    for p_set in PIN_SETS:
+        for d in DRIVERS:
+            test_one(p_set, d)
+    print("\n=== สแกนครบทุกรายการแล้ว ===")
+
+if __name__ == "__main__":
+    start_scan()
