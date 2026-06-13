@@ -1,0 +1,357 @@
+import machine
+import time
+import framebuf
+import network
+import ntptime
+import urequests
+import json
+import gc
+from neopixel import NeoPixel
+
+# ==============================================
+# ตั้งค่าพื้นฐาน
+# ==============================================
+machine.freq(240000000)
+time.sleep(0.5)
+
+# ขาเชื่อมต่อ - บันทึกไว้ชัดเจน
+PIN_SCL     = 1
+PIN_SDA     = 2
+PIN_LED     = 48
+PIN_BUTTON  = 17
+PIN_UART_TX = 10
+PIN_UART_RX = 11
+
+# การเชื่อมต่อ
+WIFI_SSID   = "OPPO A17k"
+WIFI_PASS   = "Aa123123"
+TZ_OFFSET   = 7 * 3600  # เวลาประเทศไทย
+WEATHER_KEY = "8f81d84829c8a42a0b0b2f5e4b7c9a1a"
+WEATHER_LOC = "Chachoengsao,TH"
+
+# API ปัญญาประดิษฐ์
+API_KEY     = ""
+API_URL     = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=" + API_KEY
+
+# ==============================================
+# เริ่มต้นอุปกรณ์
+# ==============================================
+i2c = machine.I2C(0, scl=machine.Pin(PIN_SCL), sda=machine.Pin(PIN_SDA), freq=400000)
+np = NeoPixel(machine.Pin(PIN_LED), 1)
+btn = machine.Pin(PIN_BUTTON, machine.Pin.IN, machine.Pin.PULL_UP)
+uart = machine.UART(1, baudrate=9600, tx=PIN_UART_TX, rx=PIN_UART_RX)
+
+# หน้าจอ OLED 128x32
+WIDTH, HEIGHT = 128, 32
+buf = bytearray(WIDTH * HEIGHT // 8)
+fb = framebuf.FrameBuffer(buf, WIDTH, HEIGHT, framebuf.MONO_VLSB)
+oled_addr = 0x3C
+
+# ตัวแปรควบคุมระบบ
+wifi_ok     = False
+time_synced = False
+last_sync   = 0
+sync_int    = 3600
+last_gc     = 0
+gc_int      = 15
+last_weather= 0
+weather_int = 1800
+
+scroll1_pos = 0
+scroll2_pos = 0
+scroll_speed= 0.18
+
+line2_text  = ""
+line3_text  = ""
+weather_data= {}
+
+# เมนู
+in_menu     = False
+menu_idx    = 0
+menu_list   = [
+    "System Status",
+    "Ask AI",
+    "WiFi Info",
+    "Weather Now",
+    "Restart",
+    "Exit Menu"
+]
+
+# ==============================================
+# ฟังก์ชันพื้นฐาน
+# ==============================================
+def oled_cmd(cmd):
+    i2c.writeto(oled_addr, b'\x00' + bytes([cmd]))
+
+def oled_init():
+    oled_cmd(0xAE)
+    oled_cmd(0xD5); oled_cmd(0x80)
+    oled_cmd(0xA8); oled_cmd(0x1F)
+    oled_cmd(0xD3); oled_cmd(0x00)
+    oled_cmd(0x40)
+    oled_cmd(0x8D); oled_cmd(0x14)
+    oled_cmd(0x20); oled_cmd(0x00)
+    oled_cmd(0xA1)
+    oled_cmd(0xC8)
+    oled_cmd(0xDA); oled_cmd(0x02)
+    oled_cmd(0x81); oled_cmd(0xCF)
+    oled_cmd(0xD9); oled_cmd(0xF1)
+    oled_cmd(0xDB); oled_cmd(0x30)
+    oled_cmd(0xA4)
+    oled_cmd(0xA6)
+    oled_cmd(0xAF)
+
+def oled_show():
+    oled_cmd(0x21); oled_cmd(0x00); oled_cmd(0x7F)
+    oled_cmd(0x22); oled_cmd(0x00); oled_cmd(0x03)
+    i2c.writeto(oled_addr, b'\x40' + buf)
+
+# ===================== ส่วนแสดงผลหน้าเชลล์ =====================
+def print_header():
+    """แสดงหัวข้อและรายการขาเชื่อมต่อตอนเริ่มต้น"""
+    print("\n" + "="*78)
+    print("        🤖 AI JAVIT SYSTEM - STABLE EDITION        ")
+    print("="*78)
+    print("📌 PIN ASSIGNMENT (ESP32-S3 N16):")
+    print(f"   OLED I2C  → SCL = GPIO{PIN_SCL} | SDA = GPIO{PIN_SDA}")
+    print(f"   UART      → TX  = GPIO{PIN_UART_TX} | RX = GPIO{PIN_UART_RX}")
+    print(f"   BUTTON    → GPIO{PIN_BUTTON}")
+    print(f"   LED       → GPIO{PIN_LED}")
+    print("-"*78)
+    print("🔄 SYSTEM STARTING...\n")
+
+def print_log(label, text, max_len=72):
+    """แสดงสถานะการทำงานแบบกระชับ อ่านง่าย"""
+    if len(text) <= max_len:
+        print(f"\r{label:<12} | {text:<{max_len}}", end="")
+    else:
+        print(f"\r{label:<12} | {text[:max_len]}...", end="")
+
+def get_system_info():
+    total = gc.mem_alloc() + gc.mem_free()
+    used  = gc.mem_alloc()
+    return {
+        "used": round(used / 1024, 1),
+        "total": round(total / 1024, 1),
+        "percent": round((used / total) * 100, 1) if total else 0,
+        "cpu": machine.freq() // 1000000
+    }
+
+def get_current_time():
+    if time_synced:
+        t = time.localtime(time.time() + TZ_OFFSET)
+        return f"{t[2]:02d}/{t[1]:02d}", f"{t[3]:02d}:{t[4]:02d}:{t[5]:02d}"
+    return "--/--", "--:--:--"
+
+def connect_wifi():
+    global wifi_ok
+    wlan = network.WLAN(network.STA_IF)
+    wlan.active(True)
+    if not wlan.isconnected():
+        print_log("WIFI", f"Connecting to {WIFI_SSID}...")
+        wlan.connect(WIFI_SSID, WIFI_PASS)
+        for _ in range(20):
+            if wlan.isconnected():
+                break
+            time.sleep(0.3)
+    if wlan.isconnected():
+        wifi_ok = True
+        ip = wlan.ifconfig()[0]
+        print_log("WIFI", f"Connected successfully | IP: {ip}")
+    else:
+        wifi_ok = False
+        print_log("WIFI", "Connection failed")
+
+def sync_time():
+    global time_synced
+    if not wifi_ok:
+        return
+    try:
+        print_log("TIME", "Syncing with server...")
+        ntptime.settime()
+        time_synced = True
+        print_log("TIME", "Synced | Timezone: UTC+7 (TH)")
+    except Exception as e:
+        print_log("TIME", f"Sync error: {e}")
+
+def get_weather():
+    global weather_data
+    if not wifi_ok:
+        return
+    try:
+        print_log("WEATHER", "Updating Chachoengsao data...")
+        url = f"http://api.openweathermap.org/data/2.5/weather?q={WEATHER_LOC}&appid={WEATHER_KEY}&units=metric"
+        res = urequests.get(url, timeout=10)
+        if res.status_code == 200:
+            j = res.json()
+            weather_data = {
+                "temp": round(j["main"]["temp"], 1),
+                "hum": j["main"]["humidity"],
+                "desc": j["weather"][0]["description"]
+            }
+            print_log("WEATHER", f"Temp: {weather_data['temp']}°C | Humidity: {weather_data['hum']}%")
+        res.close()
+    except Exception as e:
+        print_log("WEATHER", f"Update error: {e}")
+
+def ask_ai(question):
+    if not wifi_ok:
+        return "No WiFi connection"
+    try:
+        print_log("AI", f"Query: {question[:40]}...")
+        headers = {"Content-Type": "application/json"}
+        data = {"contents": [{"parts": [{"text": f"Answer briefly in English under 50 words: {question}"}]}]}
+        res = urequests.post(API_URL, headers=headers, data=json.dumps(data), timeout=12)
+        if res.status_code == 200:
+            reply = res.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+            print_log("AI", f"Reply: {reply}")
+            uart.write(reply + "\n")
+            return reply
+        return f"Error code: {res.status_code}"
+    except Exception as e:
+        return f"Request failed: {e}"
+
+# ==============================================
+# การแสดงผลหน้าจอ - เหมือนเดิมไม่แก้ไข
+# ==============================================
+def draw_normal():
+    global scroll1_pos, scroll2_pos
+    fb.fill(0)
+    fb.text("AI JAVIT", 0, 0)
+    if len(line2_text) * 8 > WIDTH:
+        fb.text(line2_text, -scroll1_pos, 10)
+        scroll1_pos += 1
+        if scroll1_pos > len(line2_text) * 8:
+            scroll1_pos = 0
+    else:
+        fb.text(line2_text, 0, 10)
+    if len(line3_text) * 8 > WIDTH:
+        fb.text(line3_text, -scroll2_pos, 22)
+        scroll2_pos += 1
+        if scroll2_pos > len(line3_text) * 8:
+            scroll2_pos = 0
+    else:
+        fb.text(line3_text, 0, 22)
+    oled_show()
+
+def draw_menu():
+    fb.fill(0)
+    fb.text("<< MENU >>", 25, 0)
+    fb.text(f"> {menu_list[menu_idx]}", 0, 16)
+    oled_show()
+
+# ==============================================
+# การจัดการปุ่ม
+# ==============================================
+def check_button():
+    global in_menu, menu_idx, scroll1_pos, scroll2_pos
+    if btn.value():
+        return
+    time.sleep_ms(20)
+    if btn.value():
+        return
+    start = time.ticks_ms()
+    while not btn.value():
+        time.sleep_ms(10)
+    press = time.ticks_diff(time.ticks_ms(), start)
+
+    if not in_menu:
+        if press > 900:
+            in_menu = True
+            menu_idx = 0
+            print_log("MENU", "Entered main menu")
+        else:
+            ask_ai("Explain what is ESP32 briefly")
+    else:
+        if press < 900:
+            menu_idx = (menu_idx + 1) % len(menu_list)
+        else:
+            if menu_idx == 0:
+                sys = get_system_info()
+                print_log("MENU", f"RAM: {sys['used']}/{sys['total']}KB | CPU: {sys['cpu']}MHz")
+            elif menu_idx == 1:
+                ask_ai("Give one fun fact about microcontrollers")
+            elif menu_idx == 2:
+                print_log("MENU", f"WiFi: {'Connected' if wifi_ok else 'Disconnected'}")
+            elif menu_idx == 3:
+                if weather_data:
+                    print_log("MENU", f"Weather: {weather_data['temp']}°C, {weather_data['hum']}% RH")
+            elif menu_idx == 4:
+                print_log("MENU", "System restarting...")
+                time.sleep(1)
+                machine.reset()
+            elif menu_idx == 5:
+                in_menu = False
+                scroll1_pos = scroll2_pos = 0
+                print_log("MENU", "Exited menu")
+
+# ==============================================
+# ลูปหลัก
+# ==============================================
+def main():
+    global last_sync, last_gc, last_weather, line2_text, line3_text
+    gc.collect()
+    oled_init()
+    fb.fill(0)
+    fb.text("STARTING...", 25, 12)
+    oled_show()
+
+    # แสดงส่วนหัวและขาเชื่อมต่อทันที
+    print_header()
+
+    connect_wifi()
+    if wifi_ok:
+        sync_time()
+        get_weather()
+        last_sync = last_weather = time.time()
+        time.sleep(1)
+        ask_ai("Say hello and confirm system is ready")
+
+    while True:
+        now = time.time()
+        sys = get_system_info()
+        d, t = get_current_time()
+
+        # ข้อความแสดงผลหน้าจอ - เหมือนเดิม
+        line2_text = f"{d} {t} | WiFi:{'ON' if wifi_ok else 'OFF'} | RAM:{sys['used']}/{sys['total']}KB ({sys['percent']}%) | CPU:{sys['cpu']}MHz"
+        if weather_data:
+            line3_text = f"CHACHOENGSAO | {weather_data['temp']}°C | {weather_data['hum']}%RH | {weather_data['desc']}"
+        else:
+            line3_text = "Watching data..."
+
+        if not in_menu:
+            draw_normal()
+        else:
+            draw_menu()
+
+        # แสดงสถานะต่อเนื่องทางหน้าเชลล์
+        print_log("STATUS", line2_text)
+
+        # อัปเดตข้อมูลเป็นระยะ
+        if wifi_ok and (now - last_sync) > sync_int:
+            sync_time()
+            last_sync = now
+        if wifi_ok and (now - last_weather) > weather_int:
+            get_weather()
+            last_weather = now
+        if (now - last_gc) > gc_int:
+            gc.collect()
+            last_gc = now
+            print_log("SYSTEM", "Memory cleaned")
+
+        check_button()
+        time.sleep(scroll_speed)
+
+# เริ่มทำงาน
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        print(f"\n❌ SYSTEM ERROR: {e} | Restarting in 2 seconds...")
+        fb.fill(0)
+        fb.text("RESTART", 35, 12)
+        oled_show()
+        time.sleep(2)
+        machine.reset()
+
+
