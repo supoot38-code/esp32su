@@ -1,0 +1,411 @@
+from machine import Pin, SPI
+import time, gc
+
+def rgb(r, g, b):
+    return bytes((r & 0xFC, g & 0xFC, b & 0xFC))
+
+# ==================================
+# คลาสจอแสดงผล ILI9488
+# ==================================
+class ILI9488:
+    def __init__(self, spi, cs, dc, rst):
+        self.spi = spi
+        self.cs = cs
+        self.dc = dc
+        self.rst = rst
+        self.w = 480
+        self.h = 320
+        self.cs.value(1)
+        self.dc.value(1)
+        self.rst.value(1)
+        self._reset()
+        self._init()
+
+    def _reset(self):
+        self.rst.value(0)
+        time.sleep_ms(200)
+        self.rst.value(1)
+        time.sleep_ms(300)
+
+    def _cmd(self, cmd):
+        self.dc.value(0)
+        self.cs.value(0)
+        self.spi.write(bytes([cmd]))
+        self.cs.value(1)
+
+    def _data(self, data):
+        self.dc.value(1)
+        self.cs.value(0)
+        self.spi.write(data if isinstance(data, bytes) else bytes([data]))
+        self.cs.value(1)
+
+    def _init(self):
+        self._cmd(0x01)
+        time.sleep_ms(300)
+        self._cmd(0x11)
+        time.sleep_ms(200)
+        self._cmd(0x36)
+        self._data(0x28)
+        self._cmd(0x3A)
+        self._data(0x66)
+        self._cmd(0x2A)
+        self._data(b'\x00\x00\x01\xDF')
+        self._cmd(0x2B)
+        self._data(b'\x00\x00\x01\x3F')
+        self._cmd(0xC0)
+        self._data(0x15)
+        self._data(0x15)
+        self._cmd(0xC1)
+        self._data(0x45)
+        self._cmd(0x29)
+        time.sleep_ms(200)
+
+    def set_window(self, x0, y0, x1, y1):
+        x0 = max(0, min(x0, self.w - 1))
+        y0 = max(0, min(y0, self.h - 1))
+        x1 = max(x0, min(x1, self.w - 1))
+        y1 = max(y0, min(y1, self.h - 1))
+        self._cmd(0x2A)
+        self._data(bytes([x0>>8, x0&0xFF, x1>>8, x1&0xFF]))
+        self._cmd(0x2B)
+        self._data(bytes([y0>>8, y0&0xFF, y1>>8, y1&0xFF]))
+        self._cmd(0x2C)
+
+    def fill(self, r=255, g=255, b=255):
+        c = rgb(r,g,b)
+        self.set_window(0, 0, self.w-1, self.h-1)
+        buf = c * self.w
+        for _ in range(self.h):
+            self._data(buf)
+
+    def draw_pixel(self, x, y, r, g, b):
+        if 0 <= x < self.w and 0 <= y < self.h:
+            self.set_window(x, y, x, y)
+            self._data(rgb(r, g, b))
+
+    def draw_rect(self, x, y, w, h, r, g, b, border=1):
+        c = rgb(r,g,b)
+        self.set_window(x, y, x+w-1, y+h-1)
+        buf = c * w
+        for _ in range(h):
+            self._data(buf)
+        if border:
+            cb = rgb(255,255,255)
+            self.set_window(x, y, x+w-1, y); self._data(cb * w)
+            self.set_window(x, y+h-1, x+w-1, y+h-1); self._data(cb * w)
+            self.set_window(x, y, x, y+h-1); self._data(bytes([cb[0]] * h))
+            self.set_window(x+w-1, y, x+w-1, y+h-1); self._data(bytes([cb[0]] * h))
+
+    def draw_char(self, x, y, ch, r=255, g=255, b=255, scale=1):
+        font = {
+            ' ': [0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00],
+            '!': [0x18,0x3C,0x3C,0x18,0x18,0x00,0x18,0x00],
+            '.': [0x00,0x00,0x00,0x00,0x00,0x00,0x18,0x38],
+            '0': [0x3C,0x66,0x6E,0x76,0x66,0x66,0x3C,0x00],
+            '1': [0x18,0x38,0x18,0x18,0x18,0x18,0x3C,0x00],
+            '2': [0x3C,0x66,0x06,0x1C,0x30,0x60,0x7E,0x00],
+            '3': [0x3C,0x66,0x06,0x1C,0x06,0x66,0x3C,0x00],
+            '4': [0x0C,0x1C,0x2C,0x4C,0x7E,0x0C,0x0C,0x00],
+            '5': [0x7E,0x60,0x7C,0x06,0x06,0x66,0x3C,0x00],
+            '6': [0x3C,0x66,0x60,0x7C,0x66,0x66,0x3C,0x00],
+            '7': [0x7E,0x66,0x06,0x0C,0x18,0x18,0x18,0x00],
+            '8': [0x3C,0x66,0x66,0x3C,0x66,0x66,0x3C,0x00],
+            '9': [0x3C,0x66,0x66,0x3E,0x06,0x66,0x3C,0x00],
+            ':': [0x00,0x18,0x18,0x00,0x00,0x18,0x18,0x00],
+            'A': [0x18,0x3C,0x66,0x66,0x7E,0x66,0x66,0x00],
+            'B': [0x7C,0x66,0x66,0x7C,0x66,0x66,0x7C,0x00],
+            'C': [0x3C,0x66,0x60,0x60,0x60,0x66,0x3C,0x00],
+            'D': [0x78,0x6C,0x66,0x66,0x66,0x6C,0x78,0x00],
+            'E': [0x7E,0x60,0x60,0x78,0x60,0x60,0x7E,0x00],
+            'F': [0x7E,0x60,0x60,0x78,0x60,0x60,0x60,0x00],
+            'G': [0x3C,0x66,0x60,0x6E,0x66,0x66,0x3C,0x00],
+            'H': [0x66,0x66,0x66,0x7E,0x66,0x66,0x66,0x00],
+            'I': [0x3C,0x18,0x18,0x18,0x18,0x18,0x3C,0x00],
+            'J': [0x1E,0x0C,0x0C,0x0C,0x0C,0x6C,0x38,0x00],
+            'K': [0x66,0x6C,0x78,0x70,0x78,0x6C,0x66,0x00],
+            'L': [0x60,0x60,0x60,0x60,0x60,0x66,0x7E,0x00],
+            'M': [0x66,0x7E,0x7E,0x66,0x66,0x66,0x66,0x00],
+            'N': [0x66,0x66,0x76,0x7E,0x6E,0x66,0x66,0x00],
+            'O': [0x3C,0x66,0x66,0x66,0x66,0x66,0x3C,0x00],
+            'P': [0x7C,0x66,0x66,0x7C,0x60,0x60,0x60,0x00],
+            'Q': [0x3C,0x66,0x66,0x66,0x66,0x3E,0x06,0x00],
+            'R': [0x7C,0x66,0x66,0x7C,0x70,0x68,0x66,0x00],
+            'S': [0x3C,0x66,0x60,0x3C,0x06,0x66,0x3C,0x00],
+            'T': [0x7E,0x7E,0x18,0x18,0x18,0x18,0x18,0x00],
+            'U': [0x66,0x66,0x66,0x66,0x66,0x66,0x3C,0x00],
+            'V': [0x66,0x66,0x66,0x66,0x66,0x3C,0x18,0x00],
+            'W': [0x66,0x66,0x66,0x66,0x7E,0x7E,0x66,0x00],
+            'X': [0x66,0x66,0x3C,0x18,0x3C,0x66,0x66,0x00],
+            'Y': [0x66,0x66,0x3C,0x18,0x18,0x18,0x18,0x00],
+            'Z': [0x7E,0x66,0x0C,0x18,0x30,0x66,0x7E,0x00],
+            '-': [0x00,0x00,0x00,0x3C,0x00,0x00,0x00,0x00],
+            '_': [0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x7E],
+            '/': [0x02,0x06,0x0C,0x18,0x30,0x60,0x40,0x00],
+        }
+        if ch not in font:
+            return
+        data = font[ch]
+        for row in range(8):
+            for col in range(8):
+                if data[row] & (1 << (7 - col)):
+                    for sy in range(scale):
+                        for sx in range(scale):
+                            self.draw_pixel(x + col*scale + sx, y + row*scale + sy, r, g, b)
+
+    def draw_text(self, x, y, text, r=255, g=255, b=255, scale=1):
+        offset = 0
+        for ch in text.upper():
+            self.draw_char(x + offset, y, ch, r, g, b, scale)
+            offset += 8 * scale + 1
+
+    def draw_main_menu(self):
+        self.fill(20, 40, 90)
+        self.draw_text(95, 8, "JARVIS AI SYSTEM", 255, 220, 0, scale=2)
+        self.draw_rect(25, 40, 205, 75, 60, 130, 220)
+        self.draw_text(85, 62, "MENU", scale=2)
+        self.draw_rect(265, 40, 205, 75, 40, 170, 100)
+        self.draw_text(290, 62, "AI JARVIS", scale=2)
+        self.draw_rect(25, 125, 205, 75, 200, 160, 60)
+        self.draw_text(60, 147, "SETTINGS", scale=2)
+        self.draw_rect(265, 125, 205, 75, 160, 60, 130)
+        self.draw_text(295, 147, "CONFIG", scale=2)
+        self.draw_rect(25, 210, 205, 75, 80, 80, 200)
+        self.draw_text(40, 232, "SYSTEM INFO", scale=2)
+        self.draw_rect(265, 210, 205, 75, 200, 60, 60)
+        self.draw_text(335, 232, "SHELL", scale=2)
+
+    # ===== หน้า System Info ปรับเป็น 2 คอลัมน์ =====
+    def draw_system_info(self):
+        total_ram = 288 * 1024
+        free_ram = gc.mem_free()
+        used_ram = max(0, total_ram - free_ram)
+        percent = round((used_ram / total_ram) * 100, 1) if total_ram > 0 else 0
+
+        self.fill(10, 30, 60)
+        self.draw_text(90, 6, "SYSTEM INFORMATION", 255, 220, 0, scale=2)
+        self.draw_text(10, 30, "-" * 58, 120, 150, 220, scale=1)
+
+        # --- คอลัมน์ซ้าย: ข้อมูลทั่วไป ---
+        y = 46
+        self.draw_text(15, y, "MAIN BOARD   : ESP32", 220, 235, 255)
+        y += 14
+        self.draw_text(15, y, "CPU          : XTENSA DUAL-CORE", 220, 235, 255)
+        y += 14
+        self.draw_text(15, y, "CLOCK SPEED  : 240 MHZ", 220, 235, 255)
+        y += 14
+        self.draw_text(15, y, f"RAM TOTAL    : {total_ram//1024} KB", 220, 235, 255)
+        y += 14
+        self.draw_text(15, y, f"RAM USED     : {used_ram//1024} KB", 220, 235, 255)
+        y += 14
+        self.draw_text(15, y, f"RAM FREE     : {free_ram//1024} KB", 220, 235, 255)
+        y += 14
+        self.draw_text(15, y, f"USAGE        : {percent} %", 255, 200, 100)
+        y += 14
+        self.draw_text(15, y, "DISPLAY      : ILI9488", 220, 235, 255)
+        y += 14
+        self.draw_text(15, y, "RESOLUTION   : 480 X 320", 220, 235, 255)
+        y += 14
+        self.draw_text(15, y, "INTERFACE    : SPI BUS", 220, 235, 255)
+
+        # --- คอลัมน์ขวา: รายการขาทั้งหมด ---
+        x_right = 250
+        y = 46
+        self.draw_text(x_right, y, "DISPLAY PINS:", 255, 220, 0)
+        y += 14
+        self.draw_text(x_right + 8, y, "TFT_CS   : GPIO4", 200, 220, 255)
+        y += 14
+        self.draw_text(x_right + 8, y, "TFT_RST  : GPIO5", 200, 220, 255)
+        y += 14
+        self.draw_text(x_right + 8, y, "TFT_DC   : GPIO6", 200, 220, 255)
+        y += 14
+        self.draw_text(x_right + 8, y, "TFT_SCK  : GPIO7", 200, 220, 255)
+        y += 14
+        self.draw_text(x_right + 8, y, "TFT_MOSI : GPIO8", 200, 220, 255)
+        y += 14
+        self.draw_text(x_right + 8, y, "TFT_MISO : GPIO9", 200, 220, 255)
+        y += 14
+        self.draw_text(x_right + 8, y, "TFT_BL   : GPIO10", 200, 220, 255)
+        y += 14
+        self.draw_text(x_right, y, "TOUCH PINS:", 255, 220, 0)
+        y += 14
+        self.draw_text(x_right + 8, y, "TP_SCK   : GPIO11", 200, 220, 255)
+        y += 14
+        self.draw_text(x_right + 8, y, "TP_CS    : GPIO12", 200, 220, 255)
+        y += 14
+        self.draw_text(x_right + 8, y, "TP_MOSI  : GPIO13", 200, 220, 255)
+        y += 14
+        self.draw_text(x_right + 8, y, "TP_MISO  : GPIO14", 200, 220, 255)
+        y += 14
+        self.draw_text(x_right, y, "COMM PORT:", 255, 220, 0)
+        y += 14
+        self.draw_text(x_right + 8, y, "UART TX  : GPIO20", 200, 220, 255)
+        y += 14
+        self.draw_text(x_right + 8, y, "UART RX  : GPIO21", 200, 220, 255)
+
+        # --- ปุ่มย้อนกลับ อยู่ล่างสุด พอดีขอบจอ ---
+        self.draw_rect(180, 280, 120, 32, 80, 80, 180)
+        self.draw_text(218, 288, "BACK", scale=2)
+
+    def draw_shell_screen(self):
+        self.fill(5, 15, 25)
+        self.draw_text(25, 8, "JARVIS TERMINAL SHELL", 0,255,120, scale=2)
+        self.draw_text(20, 40, "-" * 55, 80,180,255)
+        self.draw_text(20, 60, "> SYSTEM INITIALIZED SUCCESSFULLY", 180,255,200)
+        self.draw_text(20, 78, "> MODULES LOADED: OK", 180,255,200)
+        self.draw_text(20, 96, "> STORAGE: READY", 180,255,200)
+        self.draw_text(20, 114, "> AUDIO SYSTEM: ACTIVE", 180,255,200)
+        self.draw_text(20, 132, "> TOUCH INTERFACE: CONNECTED", 180,255,200)
+        self.draw_text(20, 150, "> NETWORK: STANDBY", 180,255,200)
+        self.draw_text(20, 168, "> ALL SYSTEMS OPERATING NORMALLY", 255,255,100)
+        self.draw_rect(180, 280, 120, 32, 80,80,180)
+        self.draw_text(218, 288, "BACK", scale=2)
+
+# ==================================
+# คลาสทัชสกรีน XPT2046
+# ==================================
+class XPT2046:
+    def __init__(self, spi, cs):
+        self.spi = spi
+        self.cs = cs
+        self.cs.value(1)
+        self.x_min = 360
+        self.x_max = 3650
+        self.y_min = 280
+        self.y_max = 3700
+        self.w = 480
+        self.h = 320
+        self.threshold = 350
+        self.last_pos = None
+
+    def _read_raw(self, cmd):
+        self.cs.value(0)
+        res = self.spi.read(3, cmd)
+        self.cs.value(1)
+        return ((res[1] << 8) | res[2]) >> 3
+
+    def get_touch(self):
+        rx = self._read_raw(0xD0)
+        ry = self._read_raw(0x90)
+
+        if rx < self.threshold or ry < self.threshold:
+            self.last_pos = None
+            return None
+
+        x = int(self.w - ((rx - self.x_min) * self.w / (self.x_max - self.x_min)))
+        y = int(self.h - ((ry - self.y_min) * self.h / (self.y_max - self.y_min)))
+
+        x = max(0, min(x, self.w - 1))
+        y = max(0, min(y, self.h - 1))
+
+        pos = (x, y)
+        if pos == self.last_pos:
+            return None
+        self.last_pos = pos
+        return pos
+
+    def is_in(self, point, x, y, w, h):
+        return point and (x <= point[0] <= x + w) and (y <= point[1] <= y + h)
+
+# ==================================
+# ฮาร์ดแวร์และการเริ่มต้นระบบ
+# ==================================
+TFT_CS   = Pin(4, Pin.OUT)
+TFT_RST  = Pin(5, Pin.OUT)
+TFT_DC   = Pin(6, Pin.OUT)
+TFT_SCK  = Pin(7)
+TFT_MOSI = Pin(8)
+TFT_MISO = Pin(9)
+TFT_BL   = Pin(10, Pin.OUT)
+
+TP_SCK   = Pin(11)
+TP_CS    = Pin(12, Pin.OUT)
+TP_MOSI  = Pin(13)
+TP_MISO  = Pin(14)
+
+spi_tft = SPI(1, baudrate=6000000, polarity=0, phase=0, sck=TFT_SCK, mosi=TFT_MOSI, miso=TFT_MISO)
+spi_tp  = SPI(2, baudrate=1200000, polarity=0, phase=0, sck=TP_SCK, mosi=TP_MOSI, miso=TP_MISO)
+
+print("=== STARTING JARVIS SYSTEM ===")
+TFT_BL.value(1)
+time.sleep_ms(500)
+tft = ILI9488(spi_tft, TFT_CS, TFT_DC, TFT_RST)
+time.sleep_ms(1000)
+touch = XPT2046(spi_tp, TP_CS)
+time.sleep_ms(500)
+
+current_screen = "main"
+drawn = False
+
+# ==================================
+# ลูปการทำงานหลัก
+# ==================================
+while True:
+    gc.collect()
+
+    if not drawn:
+        if current_screen == "main":
+            tft.draw_main_menu()
+        elif current_screen == "info":
+            tft.draw_system_info()
+        elif current_screen == "shell":
+            tft.draw_shell_screen()
+        drawn = True
+
+    p = touch.get_touch()
+    if p:
+        changed = False
+        if current_screen == "main":
+            if touch.is_in(p, 25, 40, 205, 75):
+                tft.draw_rect(25,40,205,75,0,120,220)
+                tft.draw_text(75,62,"MENU",scale=2)
+                time.sleep_ms(150)
+                drawn = False
+                changed = True
+            elif touch.is_in(p, 265, 40, 205, 75):
+                tft.draw_rect(265,40,205,75,0,160,90)
+                tft.draw_text(295,62,"AI JARVIS",scale=2)
+                time.sleep_ms(150)
+                drawn = False
+                changed = True
+            elif touch.is_in(p, 25, 125, 205, 75):
+                tft.draw_rect(25,125,205,75,200,160,60)
+                tft.draw_text(65,147,"SETTINGS",scale=2)
+                time.sleep_ms(150)
+                drawn = False
+                changed = True
+            elif touch.is_in(p, 265, 125, 205, 75):
+                tft.draw_rect(265,125,205,75,160,60,130)
+                tft.draw_text(300,147,"CONFIG",scale=2)
+                time.sleep_ms(150)
+                drawn = False
+                changed = True
+            elif touch.is_in(p, 25, 210, 205, 75):
+                current_screen = "info"
+                drawn = False
+                changed = True
+            elif touch.is_in(p, 265, 210, 205, 75):
+                current_screen = "shell"
+                drawn = False
+                changed = True
+        elif current_screen == "info":
+            if touch.is_in(p, 180, 280, 120, 32):
+                current_screen = "main"
+                drawn = False
+                changed = True
+        elif current_screen == "shell":
+            if touch.is_in(p, 180, 280, 120, 32):
+                current_screen = "main"
+                drawn = False
+                changed = True
+
+        if changed:
+            time.sleep_ms(200)
+
+    time.sleep_ms(60)
+
+
+
+
+
+
+
